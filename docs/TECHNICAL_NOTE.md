@@ -49,21 +49,22 @@ This is the cautious choice: marking it `FAILED` and retrying risks a double deb
 
 ## How duplicate provider payments are prevented
 
-Each provider call uses a stable `providerRequestId` (a UUID stored in `payment_attempts`). The mock provider implements its own idempotency on `requestId`. In the `success_then_timeout` scenario:
+A `providerRequestId` (UUID) is generated **once** at payment creation time and stored inside the outbox payload in the same atomic transaction as the payment row. Every time the outbox worker processes or retries that record, it reads this fixed ID from the payload and sends it to the provider.
 
-- The client retries the *payment API* request with the same idempotency key.
-- The idempotency layer returns the existing payment record immediately — no new provider call is made.
-- The existing `providerRequestId` in `payment_attempts` can be used for reconciliation.
+This means:
+- If the provider processed attempt 1 but the response was lost, attempt 2 sends the same `providerRequestId` — the provider recognises it as a duplicate and returns the original result without charging again.
+- The `payment_attempts` table records each worker execution with the same `providerRequestId`, giving a full audit trail.
+- The client retrying the *payment API* request with the same idempotency key hits the idempotency layer and gets the existing payment back — no new outbox record or provider call is created.
 
 ## Transaction boundaries
 
 | Operation | Transaction scope |
 |-----------|------------------|
-| Idempotency check + INSERT | Single `SERIALIZABLE` transaction with advisory lock |
-| Status transition | Single `UPDATE ... WHERE status = ANY(...)` — atomic |
-| Attempt recording | Outside the main transaction (append-only audit log) |
+| Idempotency check + INSERT payment + INSERT outbox | Single `SERIALIZABLE` transaction with advisory lock — payment and outbox record are written atomically |
+| Worker: PROCESSING transition + provider call + attempt record + SUCCESS/FAILED transition + outbox DONE | Single worker transaction using `FOR UPDATE SKIP LOCKED` — all state changes commit together or roll back |
+| Status transition (standalone) | Single `UPDATE ... WHERE status = ANY(...)` — atomic, rejects invalid transitions |
 
-Provider calls are made outside any database transaction to avoid holding locks during network I/O.
+Provider calls are made **outside** any database transaction to avoid holding locks during network I/O. The worker commits the outbox status update only after the provider call completes (or fails definitively).
 
 ## Important trade-offs
 

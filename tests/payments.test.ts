@@ -197,8 +197,9 @@ describe("POST /api/v1/payments", () => {
     await new Promise(r => setTimeout(r, 1000));
 
     const { rows } = await testPool.query("SELECT status FROM payments WHERE id = $1", [res.body.paymentId]);
-    // Status should be PROCESSING (uncertain) — not SUCCESS or FAILED
-    expect(["PROCESSING", "PENDING"]).toContain(rows[0].status);
+    // Status must be PROCESSING — the worker picked it up and transitioned it
+    // before the provider timed out. PENDING would mean the worker never ran.
+    expect(rows[0].status).toBe("PROCESSING");
   });
 });
 
@@ -350,9 +351,9 @@ describe("Scenario 7: Provider Success + Timeout", () => {
     // Wait for async processing and timeout
     await new Promise(r => setTimeout(r, 1000));
 
-    // Payment should be in PROCESSING (uncertain state)
+    // Payment should be in PROCESSING (uncertain state — provider outcome unknown)
     let paymentAfterTimeout = await request(app).get(`/api/v1/payments/${res1.body.paymentId}`);
-    expect(["PROCESSING", "PENDING"]).toContain(paymentAfterTimeout.body.status);
+    expect(paymentAfterTimeout.body.status).toBe("PROCESSING");
 
     // Client retries with the same idempotency key
     // No new provider mock is registered, so if a second provider call is made, nock will throw

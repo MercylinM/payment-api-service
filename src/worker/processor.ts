@@ -1,5 +1,4 @@
 import { pool } from "../db/migrate";
-import { v4 as uuidv4 } from "uuid";
 import { submitToProvider, ProviderRejectionError, ProviderTimeoutError } from "../provider/client";
 import * as repo from "../repositories/paymentRepository";
 import { logger } from "../logger";
@@ -50,8 +49,14 @@ async function processNext(): Promise<boolean> {
       return true;
     }
 
-    // Prepare provider request
-    const providerRequestId = uuidv4();
+    // providerRequestId is fixed at payment creation time and stored in the
+    // outbox payload. Reusing it on every retry means the provider can deduplicate
+    // on its side — preventing a double charge if the first attempt succeeded
+    // but the response was lost (Scenario 7).
+    const providerRequestId: string = payload.providerRequestId;
+    if (!providerRequestId) {
+      throw new Error(`outbox record ${outbox.id} is missing providerRequestId in payload`);
+    }
     const amountMinor: number = payload.amount; // minor units
     const amountMajor = Number((amountMinor / 100).toFixed(2));
     const currency = payload.currency;

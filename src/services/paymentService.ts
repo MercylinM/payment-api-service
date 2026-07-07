@@ -131,8 +131,12 @@ export async function createPayment(
 
       // Insert an outbox record in the same transaction so the payment processing
       // is durable and retriable by a separate worker process.
+      // providerRequestId is generated here and stored in the payload so every
+      // retry attempt reuses the same ID — preventing duplicate provider charges
+      // if the provider processed the first attempt but the response was lost.
+      const providerRequestId = uuidv4();
       await repo.insertOutbox(payment.id, "PROCESS_PAYMENT", {
-        requestId: idempotencyKey,
+        providerRequestId,
         amount: amountInMinorUnits,
         currency: body.currency.toUpperCase(),
         recipient: body.recipient,
@@ -174,102 +178,6 @@ export async function createPayment(
     }
   }
   throw new Error("Failed to create payment after retries");
-}
-
-async function processPayment(paymentId: string, body: CreatePaymentRequest): Promise<void> {
-  const timer = metrics.paymentProcessingDuration.startTimer();
-
-  await repo.transitionStatus(paymentId, "PROCESSING");
-  logger.info("payment_status_changed", { paymentId, status: "PROCESSING" });
-
-  const attemptCount = await repo.countAttempts(paymentId);
-  const attemptNumber = attemptCount + 1;
-  const providerRequestId = uuidv4();
-  const startedAt = new Date();
-
-  metrics.providerRequestsTotal.inc();
-  logger.info("provider_request_started", { paymentId, providerRequestId });
-
-  try {
-    // Normalize amount to minor units then convert to major units for provider
-    const amountMinor = validateAmount(body.amount, body.currency);
-    const amountMajor = Number((amountMinor / 100).toFixed(2));
-
-    const providerResp = await submitToProvider({
-      requestId: providerRequestId,
-      amount: amountMajor,
-      currency: body.currency.toUpperCase(),
-      recipient: body.recipient.phoneNumber ?? "",
-    });
-
-    await repo.insertAttempt({
-      paymentId,
-      attemptNumber,
-      providerRequestId,
-      status: "SUCCESS",
-      requestPayload: { requestId: providerRequestId, currency: body.currency, amount: body.amount },
-      responsePayload: providerResp,
-      startedAt,
-      completedAt: new Date(),
-    });
-
-    await repo.transitionStatus(paymentId, "SUCCESS", {
-      providerReference: providerResp.providerReference,
-    });
-
-    metrics.paymentsSuccessTotal.inc();
-    logger.info("payment_status_changed", { paymentId, status: "SUCCESS", providerReference: providerResp.providerReference });
-  } catch (err) {
-    if (err instanceof ProviderRejectionError) {
-      await repo.insertAttempt({
-        paymentId,
-        attemptNumber,
-        providerRequestId,
-        status: "FAILED",
-        requestPayload: { requestId: providerRequestId, currency: body.currency, amount: body.amount },
-        errorCode: err.code,
-        errorMessage: err.message,
-        startedAt,
-        completedAt: new Date(),
-      });
-      await repo.transitionStatus(paymentId, "FAILED", {
-        failureCode: err.code,
-        failureMessage: err.message,
-      });
-      metrics.paymentsFailedTotal.inc();
-      logger.info("payment_status_changed", { paymentId, status: "FAILED", failureCode: err.code });
-    } else if (err instanceof ProviderTimeoutError) {
-      // CRITICAL: We do NOT know if the provider processed this.
-      // Leave status as PROCESSING so it can be reconciled / retried safely.
-      metrics.providerTimeoutsTotal.inc();
-      await repo.insertAttempt({
-        paymentId,
-        attemptNumber,
-        providerRequestId,
-        status: "TIMEOUT",
-        requestPayload: { requestId: providerRequestId, currency: body.currency, amount: body.amount },
-        errorCode: "provider_timeout",
-        errorMessage: "Provider did not respond within the timeout window",
-        startedAt,
-        completedAt: new Date(),
-      });
-      logger.warn("provider_timeout", { paymentId, providerRequestId });
-    } else {
-      await repo.insertAttempt({
-        paymentId,
-        attemptNumber,
-        providerRequestId,
-        status: "ERROR",
-        errorCode: "internal_error",
-        errorMessage: (err as Error).message,
-        startedAt,
-        completedAt: new Date(),
-      });
-      logger.error("provider_error", { paymentId, error: (err as Error).message });
-    }
-  } finally {
-    timer();
-  }
 }
 
 export async function getPayment(paymentId: string): Promise<Payment> {
