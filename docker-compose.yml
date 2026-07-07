@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mock-provider:
+    build:
+      context: .
+      dockerfile: Dockerfile.provider
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      # PROVIDER_MODE options: success | reject | timeout | success_then_timeout
+      PROVIDER_MODE: success
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://payments:payments@postgres:5432/payments
+      PROVIDER_URL: http://mock-provider:4000
+      PROVIDER_TIMEOUT_MS: 5000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-provider:
+        condition: service_started
