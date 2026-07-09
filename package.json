@@ -7,8 +7,7 @@
     "dev": "ts-node src/app.ts",
     "migrate": "node -r ts-node/register src/db/migrate.ts",
     "test": "jest --runInBand --forceExit",
-    "worker": "ts-node src/worker/processor.ts",
-    "quickstart": "bash scripts/quickstart.sh"
+    "worker": "ts-node src/worker/processor.ts"
   },
   "dependencies": {
     "axios": "^1.6.7",
