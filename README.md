@@ -100,7 +100,8 @@ curl http://localhost:3000/api/v1/payments/<paymentId>
 ### Prerequisites
 
 - Node.js 20+
-- PostgreSQL 16+ (or Docker)
+- PostgreSQL 16+
+- Docker and Docker Compose (for running PostgreSQL and the full stack)
 - npm 8+
 
 ### Setup
@@ -371,21 +372,6 @@ All tests run against a real PostgreSQL database. The concurrency test uses `Pro
 
 ---
 
-## Deployment
-
-### Docker
-
-```bash
-# Build image
-docker build -t payment-api:latest .
-
-# Run image
-docker run -d \
-  -p 3000:3000 \
-  -e DATABASE_URL=postgres://user:pass@db:5432/payments \
-  -e PROVIDER_URL=https://provider.example.com \
-  payment-api:latest
-```
 
 ---
 
