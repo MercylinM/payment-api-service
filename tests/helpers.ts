@@ -10,7 +10,7 @@ export async function setupDb(): Promise<void> {
 }
 
 export async function cleanDb(): Promise<void> {
-  await testPool.query("TRUNCATE payment_attempts, payments CASCADE");
+  await testPool.query("TRUNCATE payment_attempts, payment_outbox, payments CASCADE");
 }
 
 export async function teardownDb(): Promise<void> {

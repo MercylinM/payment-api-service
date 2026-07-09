@@ -74,6 +74,10 @@ async function processNext(): Promise<boolean> {
         recipient,
       });
 
+      if (!providerResp.providerReference) {
+        throw new Error("Provider returned success without providerReference");
+      }
+
       // Insert attempt
       await repo.insertAttempt(
         {

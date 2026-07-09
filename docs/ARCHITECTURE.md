@@ -9,12 +9,12 @@ The Payment API Service handles financial transactions with guarantees around id
 ```
 Client
   |
-  +-- POST /api/v1/payments ---------> Validation
+  ├── POST /api/v1/payments ---------> Validation
                                            |
                                     Idempotency check
                                     (advisory lock + SERIALIZABLE tx)
                                            |
-                                    +------+------+
+                                    ├──----├──----+
                                     |             |
                                  Duplicate     New payment
                                     |             |
@@ -23,7 +23,7 @@ Client
                                               COMMIT
                                               201 Created
   |
-  +-- GET /api/v1/payments/:id ------> Return current payment status
+  └── GET /api/v1/payments/:id ------> Return current payment status
 
 
 Outbox Worker (background)
@@ -34,10 +34,10 @@ Outbox Worker (background)
   |
   Call provider
   |
-  +-- Success  --> payment = SUCCESS,    outbox = DONE
-  +-- Rejected --> payment = FAILED,     outbox = DONE
-  +-- Timeout  --> payment = PROCESSING, outbox retried (same providerRequestId)
-  +-- Max retries exceeded --> outbox = FAILED (dead-letter)
+  ├── Success  --> payment = SUCCESS,    outbox = DONE
+  ├── Rejected --> payment = FAILED,     outbox = DONE
+  ├── Timeout  --> payment = PROCESSING, outbox retried (same providerRequestId)
+  └── Max retries exceeded --> outbox = FAILED (dead-letter)
 ```
 
 ---
@@ -105,8 +105,10 @@ This also makes the request hash deterministic — `1500`, `1500.0`, and `1500.0
 Valid transitions are:
 
 ```
-PENDING -> PROCESSING -> SUCCESS
-                      -> FAILED
+PENDING    -> PROCESSING
+PROCESSING -> PROCESSING (worker retry: payment already in PROCESSING from a prior attempt)
+PROCESSING -> SUCCESS
+PROCESSING -> FAILED
 ```
 
 Terminal statuses (`SUCCESS` and `FAILED`) have no valid outgoing transitions, so a payment that has reached a final state cannot be moved backwards.
@@ -133,7 +135,7 @@ The worker runs a continuous poll loop. On each iteration it selects one `PENDIN
 
 The worker transitions the payment to `PROCESSING`, then calls the provider using the `providerRequestId` from the outbox payload. All state changes — the payment status update, the attempt record, and the outbox status update — are committed in a single transaction so they are always consistent.
 
-On a successful provider response the payment moves to `SUCCESS` and the outbox record is marked `DONE`. On a business rejection the payment moves to `FAILED` and the outbox is marked `DONE`. On a timeout or transient error the outbox retry count is incremented and the record is reset to `PENDING` for the next poll cycle. The payment remains in `PROCESSING` because the outcome is genuinely unknown. Once the retry count exceeds the maximum, the outbox record is marked `FAILED` and requires manual reconciliation.
+On a successful provider response the payment moves to `SUCCESS` and the outbox record is marked `DONE`. On a business rejection the payment moves to `FAILED` and the outbox is marked `DONE`. On a timeout or transient error the outbox retry count is incremented and the record is reset to `PENDING` for the next poll cycle. The payment remains in `PROCESSING` because the outcome is genuinely unknown. Once the retry count exceeds five attempts, the outbox record is marked `FAILED` and requires manual reconciliation. The payment itself remains in `PROCESSING`, it is not automatically moved to `FAILED` because the provider outcome is still unknown and a human or reconciliation job must determine the correct resolution.
 
 ---
 
@@ -184,7 +186,7 @@ The **payment_outbox** table is the durable processing queue. Each row represent
 | Provider rejection | — | FAILED | Business rejection recorded with failure code |
 | Provider timeout | — | PROCESSING | Outcome unknown, outbox retried |
 | Provider 500 | — | PROCESSING | Treated as transient, outbox retried |
-| Max retries exceeded | — | PROCESSING | Outbox marked FAILED, manual reconciliation required |
+| Max retries exceeded | — | PROCESSING | Outbox marked FAILED, payment stays PROCESSING; the outcome is unknown,so manual reconciliation is required |
 | Internal error | 500 | — | No stack trace returned to client |
 
 ---

@@ -44,9 +44,9 @@ Return 201 Created
         v
 Outbox worker (background)
         |
-        +-- provider call succeeds  --> payment = SUCCESS
-        +-- provider rejects        --> payment = FAILED
-        +-- provider times out      --> payment stays PROCESSING
+        ├── provider call succeeds  --> payment = SUCCESS
+        ├── provider rejects        --> payment = FAILED
+        ├── provider times out      --> payment stays PROCESSING
                                         (retry with same providerRequestId)
 ```
 
@@ -233,12 +233,12 @@ Response `200 OK`:
 
 Payment statuses:
 
-| Status | Meaning | Terminal |
-|--------|---------|----------|
-| `PENDING` | Created, awaiting worker pickup | No |
-| `PROCESSING` | Worker has called the provider | No |
-| `SUCCESS` | Provider accepted the payment | Yes |
-| `FAILED` | Provider rejected with a reason | Yes |
+| Status | Meaning |
+|--------|---------|
+| `PENDING` | Created, awaiting worker pickup |
+| `PROCESSING` | Worker has called the provider |
+| `SUCCESS` | Provider accepted the payment |
+| `FAILED` | Provider rejected with a reason |
 
 Valid transitions: `PENDING -> PROCESSING -> SUCCESS` or `PROCESSING -> FAILED`. All others are rejected at the database level.
 
@@ -340,40 +340,38 @@ payment-api-service/
 
 ## Testing
 
-Tests require a running PostgreSQL instance. The Docker Compose postgres service works:
+Tests require only PostgreSQL — do not run the full Docker Compose stack while running tests. The worker container polls the same database, and if it is running it will race the test suite by processing outbox records that tests expect to control directly.
+
+Start only the database, then run the suite:
 
 ```bash
+# If the full stack is running, stop it first
+docker compose down
+
+# Start only PostgreSQL
 docker compose up postgres -d
 
+# Run the full test suite
 DATABASE_URL=postgres://payments:payments@localhost:5432/payments \
 PROVIDER_URL=http://localhost:4000 \
 PROVIDER_TIMEOUT_MS=500 \
 npm test
 ```
 
-25 integration tests across two suites:
+`PROVIDER_TIMEOUT_MS=500` keeps the timeout tests fast. Provider HTTP calls are intercepted with nock so no real provider process is needed.
+
+26 integration tests across two suites:
 
 | Suite | Tests | What is covered |
 |-------|-------|-----------------|
 | `payments.test.ts` | 24 | Create, get, idempotency, concurrency, validation, provider scenarios, observability |
-| `outbox.test.ts` | 1 | Outbox worker end-to-end with real DB |
+| `outbox.test.ts` | 2 | Outbox worker end-to-end: providerRequestId reuse on retry, successful processing |
 
-All tests run against a real PostgreSQL database. Provider HTTP calls are intercepted with nock. The concurrency test uses `Promise.all` to fire two identical requests simultaneously and asserts exactly one payment row is created.
+All tests run against a real PostgreSQL database. The concurrency test uses `Promise.all` to fire two identical requests simultaneously and asserts exactly one payment row is created.
 
 ---
 
 ## Deployment
-
-### Environment variables
-
-| Variable | Default | Required | Purpose |
-|----------|---------|----------|---------|
-| `DATABASE_URL` | — | Yes | PostgreSQL connection string |
-| `PROVIDER_URL` | `http://localhost:4000` | No | Payment provider base URL |
-| `PROVIDER_TIMEOUT_MS` | `5000` | No | Provider request timeout (ms) |
-| `PORT` | `3000` | No | HTTP server port |
-| `NODE_ENV` | `development` | No | Node environment |
-| `OUTBOX_POLL_MS` | `1000` | No | Outbox worker poll interval (ms) |
 
 ### Docker
 

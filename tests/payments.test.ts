@@ -36,8 +36,7 @@ function mockProviderReject() {
 function mockProviderTimeout() {
   nock(PROVIDER_URL)
     .post("/provider/payments")
-    .delayConnection(10_000)
-    .reply(200, {});
+    .replyWithError({ code: "ECONNABORTED", message: "timeout" });
 }
 
 // ── Scenario 1: Normal successful payment ────────────────────────────────────

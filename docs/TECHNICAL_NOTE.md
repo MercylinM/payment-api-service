@@ -2,19 +2,19 @@
 
 ## How idempotency is implemented
 
-Each payment request is scoped by `(organisation_id, idempotency_key)`. A `UNIQUE` constraint on those two columns in the `payments` table is the primary guard — no application-level check alone can prevent duplicates under concurrency.
+Each payment request is scoped by `(organisation_id, idempotency_key)`. A `UNIQUE` constraint on those two columns in the `payments` table is the primary guard, no application-level check alone can prevent duplicates under concurrency.
 
 Before inserting, the service computes a deterministic SHA-256 hash of the semantically significant request fields (amount, currency, recipient, etc.). On a repeated request the hash is compared to the stored one:
 
-- Same hash → return the existing payment (replay).
-- Different hash → reject with `409 Conflict`.
+- Same hash, return the existing payment (replay).
+- Different hash, reject with `409 Conflict`.
 
 ## How concurrent requests are handled
 
 Two requests with the same `(organisation_id, idempotency_key)` arriving simultaneously are handled by:
 
 1. A PostgreSQL advisory transaction lock keyed on an MD5 of `org:idempotency_key`. This serialises the read-then-insert within a `SERIALIZABLE` transaction.
-2. The `UNIQUE` constraint as a hard backstop — even if two transactions somehow bypass the advisory lock, only one `INSERT` will succeed; the other receives a unique-violation error which the service handles by re-reading and returning the existing payment.
+2. The `UNIQUE` constraint as a hard backstop, even if two transactions somehow bypass the advisory lock, only one `INSERT` will succeed; the other receives a unique-violation error which the service handles by re-reading and returning the existing payment.
 
 This works correctly across multiple application replicas because the lock and constraint live in the database.
 
@@ -26,7 +26,7 @@ A canonical JSON string is built from the fields that define payment identity:
 { organisationId, customerReference, amount, currency, recipientType, recipientValue }
 ```
 
-This string is SHA-256 hashed and stored as `request_hash`. `description` is intentionally excluded — it is metadata, not payment identity.
+This string is SHA-256 hashed and stored as `request_hash`. `description` is intentionally excluded, it is metadata, not payment identity.
 
 ## Request Hash Determinism
 
@@ -39,11 +39,11 @@ The amount is stored as-is (numeric) before hashing, ensuring that `1500.00` and
 
 ## How provider timeouts are handled
 
-When the provider call times out, the outcome is unknown — the provider may or may not have processed the payment. The service:
+When the provider call times out, the outcome is unknown, the provider may or may not have processed the payment. The service:
 
 1. Records a `TIMEOUT` attempt in `payment_attempts` with the `provider_request_id` used.
 2. Leaves the payment in `PROCESSING` status (does **not** mark it `FAILED`).
-3. Does not retry automatically — a human or reconciliation job must decide.
+3. Does not retry automatically, a human or reconciliation job must decide.
 
 This is the cautious choice: marking it `FAILED` and retrying risks a double debit; marking it `SUCCESS` without confirmation is incorrect.
 
@@ -54,15 +54,15 @@ A `providerRequestId` (UUID) is generated **once** at payment creation time and 
 This means:
 - If the provider processed attempt 1 but the response was lost, attempt 2 sends the same `providerRequestId` — the provider recognises it as a duplicate and returns the original result without charging again.
 - The `payment_attempts` table records each worker execution with the same `providerRequestId`, giving a full audit trail.
-- The client retrying the *payment API* request with the same idempotency key hits the idempotency layer and gets the existing payment back — no new outbox record or provider call is created.
+- The client retrying the *payment API* request with the same idempotency key hits the idempotency layer and gets the existing payment back, no new outbox record or provider call is created.
 
 ## Transaction boundaries
 
 | Operation | Transaction scope |
 |-----------|------------------|
-| Idempotency check + INSERT payment + INSERT outbox | Single `SERIALIZABLE` transaction with advisory lock — payment and outbox record are written atomically |
-| Worker: PROCESSING transition + provider call + attempt record + SUCCESS/FAILED transition + outbox DONE | Single worker transaction using `FOR UPDATE SKIP LOCKED` — all state changes commit together or roll back |
-| Status transition (standalone) | Single `UPDATE ... WHERE status = ANY(...)` — atomic, rejects invalid transitions |
+| Idempotency check + INSERT payment + INSERT outbox | Single `SERIALIZABLE` transaction with advisory lock. Payment and outbox record are written atomically |
+| Worker: PROCESSING transition + provider call + attempt record + SUCCESS/FAILED transition + outbox DONE | Single worker transaction using `FOR UPDATE SKIP LOCKED` all state changes commit together or roll back |
+| Status transition (standalone) | Single `UPDATE ... WHERE status = ANY(...)` atomic, rejects invalid transitions |
 
 Provider calls are made **outside** any database transaction to avoid holding locks during network I/O. The worker commits the outbox status update only after the provider call completes (or fails definitively).
 
