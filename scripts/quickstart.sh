@@ -73,6 +73,12 @@ echo "🌐 Starting API server..."
 npm run dev &
 API_PID=$!
 
+# Start outbox worker (drives payments from PENDING to a terminal status)
+echo ""
+echo "⚙️  Starting outbox worker..."
+npm run worker > /tmp/worker.log 2>&1 &
+WORKER_PID=$!
+
 # Display access info
 echo ""
 echo "=========================================="
@@ -86,10 +92,11 @@ echo "📌 Mock Provider: http://localhost:4000"
 echo ""
 echo "📝 Logs:"
 echo "   Provider:  tail -f /tmp/provider.log"
+echo "   Worker:    tail -f /tmp/worker.log"
 echo ""
 echo "🧪 Run tests:"
 echo "   npm test"
 echo ""
 echo "⚡ Stop services:"
-echo "   kill $API_PID $PROVIDER_PID"
+echo "   kill $API_PID $PROVIDER_PID $WORKER_PID"
 echo ""

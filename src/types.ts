@@ -2,7 +2,7 @@ export type PaymentStatus = "PENDING" | "PROCESSING" | "SUCCESS" | "FAILED";
 
 export const VALID_TRANSITIONS: Record<PaymentStatus, PaymentStatus[]> = {
   PENDING:    ["PROCESSING"],
-  PROCESSING: ["SUCCESS", "FAILED"],
+  PROCESSING: ["PROCESSING", "SUCCESS", "FAILED"],
   SUCCESS:    [],
   FAILED:     [],
 };

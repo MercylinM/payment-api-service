@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS payments (
   CONSTRAINT payments_valid_status CHECK (status IN ('PENDING','PROCESSING','SUCCESS','FAILED'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_payments_org_idempotency ON payments (organisation_id, idempotency_key);
+-- No separate index needed for (organisation_id, idempotency_key): the UNIQUE
+-- constraint above already creates a backing btree index on those columns.
 
 CREATE TABLE IF NOT EXISTS payment_attempts (
   id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),

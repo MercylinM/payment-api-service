@@ -33,6 +33,8 @@ export class PaymentNotFoundError extends Error {
   }
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function validate(body: CreatePaymentRequest, idempotencyKey: string): number {
   if (!idempotencyKey) throw new ValidationError("missing_idempotency_key", "Idempotency-Key header is required");
   if (idempotencyKey.length > 128) throw new ValidationError("idempotency_key_too_long", "Idempotency key must be 128 characters or fewer");
@@ -132,7 +134,7 @@ export async function createPayment(
       // Insert an outbox record in the same transaction so the payment processing
       // is durable and retriable by a separate worker process.
       // providerRequestId is generated here and stored in the payload so every
-      // retry attempt reuses the same ID — preventing duplicate provider charges
+      // retry attempt reuses the same ID preventing duplicate provider charges
       // if the provider processed the first attempt but the response was lost.
       const providerRequestId = uuidv4();
       await repo.insertOutbox(payment.id, "PROCESS_PAYMENT", {
@@ -172,6 +174,24 @@ export async function createPayment(
         await new Promise((r) => setTimeout(r, backoffMs));
         continue; // retry
       }
+
+      // If two transactions somehow raced past the advisory lock,
+      // the UNIQUE constraint on (organisation_id, idempotency_key)is the final guard.
+      // Re-read and treat this exactly like the existing record found, rather than surfacing a raw DB error.
+      if ((err as any)?.code === "23505") {
+        const existing = await repo.findByIdempotencyKey(body.organisationId, idempotencyKey);
+        if (existing) {
+          if (existing.requestHash !== requestHash) {
+            metrics.idempotencyConflictsTotal.inc();
+            logger.warn("idempotency_conflict", { organisationId: body.organisationId });
+            throw new IdempotencyConflictError();
+          }
+          metrics.idempotencyReplaysTotal.inc();
+          logger.info("idempotency_replay", { paymentId: existing.id });
+          return { payment: existing, isReplay: true };
+        }
+      }
+
       throw err;
     } finally {
       client.release();
@@ -181,6 +201,9 @@ export async function createPayment(
 }
 
 export async function getPayment(paymentId: string): Promise<Payment> {
+  if (!UUID_REGEX.test(paymentId)) {
+    throw new ValidationError("invalid_payment_id", "paymentId must be a valid UUID");
+  }
   const payment = await repo.findById(paymentId);
   if (!payment) throw new PaymentNotFoundError(paymentId);
   return payment;

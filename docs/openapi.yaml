@@ -1,0 +1,402 @@
+openapi: 3.0.3
+
+info:
+  title: Payment API Service
+  version: 1.0.0
+  description: >
+    A payment processing API with idempotency guarantees, concurrency safety,
+    and transparent status tracking. Payments are created synchronously and
+    processed asynchronously via an outbox worker.
+
+servers:
+  - url: http://localhost:3000
+    description: Payment API
+  - url: http://localhost:4000
+    description: Mock provider
+
+tags:
+  - name: Payments
+    description: Payment creation and status retrieval
+  - name: Observability
+    description: Health and metrics endpoints
+  - name: Mock Provider
+    description: >
+      Simulated external payment provider.
+      Behaviour is controlled by the PROVIDER_MODE environment variable on the
+      mock provider process.
+
+paths:
+  /api/v1/payments:
+    post:
+      tags: [Payments]
+      summary: Create a payment
+      description: >
+        Creates a new payment. The request is persisted immediately and
+        processed asynchronously by the outbox worker. Use the
+        `Idempotency-Key` header to safely retry without risk of duplicate
+        charges. Replaying the same key with the same body returns the
+        original payment. Replaying with a different body returns 409.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >
+            A unique key scoped to the organisation. Max 128 characters.
+            UUIDs are recommended.
+          schema:
+            type: string
+            maxLength: 128
+            example: 4b1f35d4-3ea7-4321-a777-c06fc3389478
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        '201':
+          description: Payment created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '200':
+          description: >
+            Idempotent replay. The same key and body were submitted before.
+            The original payment is returned and no new charge is created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_idempotency_key:
+                  value:
+                    error: missing_idempotency_key
+                    message: Idempotency-Key header is required
+                invalid_amount:
+                  value:
+                    error: invalid_amount
+                    message: Amount must be greater than zero
+                unsupported_currency:
+                  value:
+                    error: unsupported_currency
+                    message: Currency XYZ is not supported
+                missing_phone_number:
+                  value:
+                    error: missing_phone_number
+                    message: recipient.phoneNumber is required for MOBILE_MONEY
+        '409':
+          description: >
+            The idempotency key has already been used with a different
+            request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: idempotency_key_reused
+                message: The idempotency key has already been used with a different request
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: internal_error
+                message: An unexpected error occurred
+
+  /api/v1/payments/{paymentId}:
+    get:
+      tags: [Payments]
+      summary: Get a payment
+      description: >
+        Returns the current state of a payment. Poll this endpoint to
+        determine the final outcome after creation. A payment moves from
+        PENDING to PROCESSING when the worker picks it up, then to SUCCESS
+        or FAILED once the provider responds.
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          description: The UUID of the payment.
+          schema:
+            type: string
+            format: uuid
+            example: 7529bd27-a9f9-4bf0-a6b5-f9e120fda8ca
+      responses:
+        '200':
+          description: Payment found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          description: Payment not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: payment_not_found
+                message: Payment 7529bd27-a9f9-4bf0-a6b5-f9e120fda8ca not found
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /provider/payments:
+    post:
+      tags: [Mock Provider]
+      summary: Submit a payment to the provider
+      description: >
+        Called by the outbox worker, not by API clients directly. The worker
+        submits a payment and receives a synchronous outcome. The provider
+        deduplicates on requestId — submitting the same requestId twice always
+        returns the same result. Behaviour is controlled by PROVIDER_MODE:
+        `success` returns SUCCESS, `reject` returns 422, `timeout` never
+        responds, `success_then_timeout` processes the payment but drops the
+        response, `error500` returns HTTP 500.
+      servers:
+        - url: http://localhost:4000
+          description: Mock provider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderRequest'
+      responses:
+        '200':
+          description: Payment processed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderResponse'
+        '422':
+          description: Payment rejected by the provider (PROVIDER_MODE=reject).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: payment_rejected
+                  message:
+                    type: string
+                    example: Recipient account not found
+        '500':
+          description: Provider internal error (PROVIDER_MODE=error500).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: internal_error
+
+  /health:
+    get:
+      tags: [Observability]
+      summary: Health check
+      description: Returns service health status. Used by load balancers and orchestrators.
+      responses:
+        '200':
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /metrics:
+    get:
+      tags: [Observability]
+      summary: Prometheus metrics
+      description: >
+        Returns metrics in Prometheus text format. Key metrics include
+        payments_created_total, payments_success_total, payments_failed_total,
+        provider_requests_total, provider_timeouts_total,
+        idempotency_replays_total, idempotency_conflicts_total, and
+        payment_processing_duration_seconds.
+      responses:
+        '200':
+          description: Prometheus text format metrics.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  schemas:
+    CreatePaymentRequest:
+      type: object
+      required:
+        - organisationId
+        - customerReference
+        - amount
+        - currency
+        - recipient
+      properties:
+        organisationId:
+          type: string
+          format: uuid
+          description: The organisation initiating the payment.
+          example: 8b24a9b4-58f5-42f1-a6ef-697cfb321164
+        customerReference:
+          type: string
+          description: A reference meaningful to the caller (e.g. invoice number).
+          example: INV-2026-001
+        amount:
+          type: number
+          format: decimal
+          description: Payment amount in major units. Must be greater than zero with at most 2 decimal places.
+          example: 1500.00
+        currency:
+          type: string
+          description: ISO 4217 currency code. Supported values are KES, USD, EUR, GBP, UGX, TZS.
+          enum: [KES, USD, EUR, GBP, UGX, TZS]
+          example: KES
+        recipient:
+          $ref: '#/components/schemas/Recipient'
+        description:
+          type: string
+          description: Optional human-readable description. Not used in idempotency checks.
+          example: Supplier payment
+
+    Recipient:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          description: Recipient type. Currently only MOBILE_MONEY is supported.
+          enum: [MOBILE_MONEY]
+          example: MOBILE_MONEY
+        phoneNumber:
+          type: string
+          description: Required when type is MOBILE_MONEY.
+          example: "+254712345678"
+
+    PaymentResponse:
+      type: object
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+          example: 7529bd27-a9f9-4bf0-a6b5-f9e120fda8ca
+        organisationId:
+          type: string
+          format: uuid
+          example: 8b24a9b4-58f5-42f1-a6ef-697cfb321164
+        customerReference:
+          type: string
+          example: INV-2026-001
+        amount:
+          type: number
+          example: 1500.00
+        currency:
+          type: string
+          example: KES
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, SUCCESS, FAILED]
+          description: >
+            PENDING — created, awaiting worker pickup.
+            PROCESSING — worker has called the provider, outcome unknown.
+            SUCCESS — provider accepted the payment (terminal).
+            FAILED — provider rejected the payment (terminal).
+          example: SUCCESS
+        description:
+          type: string
+          description: Present only if supplied on creation.
+          example: Supplier payment
+        providerReference:
+          type: string
+          description: Present only when status is SUCCESS.
+          example: PROV-9837461
+        failureCode:
+          type: string
+          description: Present only when status is FAILED.
+          example: payment_rejected
+        failureMessage:
+          type: string
+          description: Present only when status is FAILED.
+          example: Recipient account not found
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-07-07T08:30:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-07-07T08:30:01Z"
+
+    ProviderRequest:
+      type: object
+      required:
+        - requestId
+        - amount
+        - currency
+        - recipient
+      properties:
+        requestId:
+          type: string
+          format: uuid
+          description: Stable identifier generated at payment creation time. Reused on every retry so the provider can deduplicate.
+          example: 7529bd27-a9f9-4bf0-a6b5-f9e120fda8ca
+        amount:
+          type: number
+          description: Payment amount in major units.
+          example: 1500.00
+        currency:
+          type: string
+          example: KES
+        recipient:
+          type: string
+          description: Phone number for MOBILE_MONEY payments.
+          example: "+254712345678"
+
+    ProviderResponse:
+      type: object
+      required:
+        - providerReference
+        - status
+      properties:
+        providerReference:
+          type: string
+          description: Provider-assigned reference for the transaction.
+          example: PROV-9837461
+        status:
+          type: string
+          enum: [SUCCESS]
+          example: SUCCESS
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          example: invalid_amount
+        message:
+          type: string
+          description: Human-readable description of the error.
+          example: Amount must be greater than zero

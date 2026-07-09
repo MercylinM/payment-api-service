@@ -85,8 +85,13 @@ curl http://localhost:3000/api/v1/payments/<paymentId>
 |---------|-----|---------|
 | API | http://localhost:3000 | Payment API |
 | Mock provider | http://localhost:4000 | Simulated payment provider |
+| Worker | http://localhost:9100 | Polls `payment_outbox` and drives payments to SUCCESS/FAILED |
+| Worker metrics | http://localhost:9100/metrics | Prometheus metrics for provider requests/timeouts/success/failure (separate process from the API, so not on port 3000) |
+| API docs | http://localhost:3000/docs | Swagger UI |
 | Health | http://localhost:3000/health | Health check |
 | Metrics | http://localhost:3000/metrics | Prometheus metrics |
+
+`docker compose up --build` starts all four containers (`postgres`, `mock-provider`, `app`, `worker`). The `worker` service runs the same image as `app` with its command overridden to `node dist/worker/processor.js`, and waits for `app`'s healthcheck (which only passes after migrations have run) before starting. Without the worker running, payments will remain in `PENDING` forever.
 
 ---
 
@@ -126,6 +131,9 @@ PROVIDER_MODE=success npx ts-node src/provider/server.ts
 
 # Terminal 2: API
 npm run dev
+
+# Terminal 3: outbox worker
+npm run worker
 ```
 
 ### Commands
@@ -133,6 +141,7 @@ npm run dev
 ```bash
 npm run build     # Compile TypeScript to dist/
 npm run dev       # Start with ts-node (hot reload)
+npm run worker    # Start the outbox worker
 npm run migrate   # Run database migrations
 npm test          # Run test suite
 ```
@@ -384,5 +393,6 @@ docker run -d \
 
 ## Documentation
 
+- [docs/openapi.yaml](docs/openapi.yaml) — OpenAPI 3.0 spec (served as Swagger UI at `/docs` when the service is running)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — System design, technology choices, scalability considerations
 - [docs/TECHNICAL_NOTE.md](docs/TECHNICAL_NOTE.md) — Idempotency implementation, concurrency strategy, trade-offs, known limitations, and production improvements

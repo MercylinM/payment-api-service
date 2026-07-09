@@ -1,3 +1,4 @@
+
 import { Router, Request, Response } from "express";
 import {
   createPayment,
@@ -58,6 +59,9 @@ router.get("/payments/:paymentId", async (req: Request, res: Response) => {
     const payment = await getPayment(req.params.paymentId);
     return res.json(toResponse(payment));
   } catch (err) {
+    if (err instanceof ValidationError) {
+      return res.status(400).json({ error: err.code, message: err.message });
+    }
     if (err instanceof PaymentNotFoundError) {
       return res.status(404).json({ error: "payment_not_found", message: err.message });
     }

@@ -1,3 +1,4 @@
+import express from "express";
 import { pool } from "../db/migrate";
 import { submitToProvider, ProviderRejectionError, ProviderTimeoutError } from "../provider/client";
 import * as repo from "../repositories/paymentRepository";
@@ -24,7 +25,7 @@ async function processNext(): Promise<boolean> {
 
     if (!rows.length) {
       await client.query("COMMIT");
-      return false; // nothing to do
+      return false; 
     }
 
     const outbox = rows[0];
@@ -51,8 +52,8 @@ async function processNext(): Promise<boolean> {
 
     // providerRequestId is fixed at payment creation time and stored in the
     // outbox payload. Reusing it on every retry means the provider can deduplicate
-    // on its side — preventing a double charge if the first attempt succeeded
-    // but the response was lost (Scenario 7).
+    // on its side preventing a double charge if the first attempt succeeded
+    // but the response was lost.
     const providerRequestId: string = payload.providerRequestId;
     if (!providerRequestId) {
       throw new Error(`outbox record ${outbox.id} is missing providerRequestId in payload`);
@@ -63,6 +64,7 @@ async function processNext(): Promise<boolean> {
     const recipient = payload.recipient?.phoneNumber ?? payload.recipient;
 
     metrics.providerRequestsTotal.inc();
+    const endTimer = metrics.paymentProcessingDuration.startTimer();
 
     try {
       const providerResp = await submitToProvider({
@@ -97,7 +99,7 @@ async function processNext(): Promise<boolean> {
       logger.info("outbox_processed_success", { outboxId: outbox.id, paymentId: outbox.payment_id });
     } catch (err) {
       if (err instanceof ProviderRejectionError) {
-        // Provider rejected — mark payment as FAILED and outbox DONE
+        // Provider rejected, mark payment as FAILED and outbox DONE
         await repo.insertAttempt(
           {
             paymentId: outbox.payment_id,
@@ -118,7 +120,7 @@ async function processNext(): Promise<boolean> {
         metrics.paymentsFailedTotal.inc();
         logger.info("outbox_processed_rejected", { outboxId: outbox.id, paymentId: outbox.payment_id });
       } else if (err instanceof ProviderTimeoutError) {
-        // Provider timeout — schedule retry
+        // Provider timeout, schedule retry
         const retries = (outbox.retry_count ?? 0) + 1;
         const newStatus = retries > MAX_RETRIES ? 'FAILED' : 'PENDING';
         await client.query(
@@ -128,7 +130,7 @@ async function processNext(): Promise<boolean> {
         metrics.providerTimeoutsTotal.inc();
         logger.warn("outbox_provider_timeout", { outboxId: outbox.id, paymentId: outbox.payment_id, retries });
       } else {
-        // Internal error — schedule retry
+        // Internal error, schedule retry
         const retries = (outbox.retry_count ?? 0) + 1;
         const newStatus = retries > MAX_RETRIES ? 'FAILED' : 'PENDING';
         await client.query(
@@ -137,6 +139,8 @@ async function processNext(): Promise<boolean> {
         );
         logger.error("outbox_processing_error", { outboxId: outbox.id, paymentId: outbox.payment_id, error: (err as Error).message });
       }
+    } finally {
+      endTimer();
     }
 
     await client.query("COMMIT");
@@ -166,6 +170,15 @@ async function runLoop() {
 }
 
 if (require.main === module) {
+  const metricsPort = parseInt(process.env.WORKER_METRICS_PORT || "9100", 10);
+  const metricsApp = express();
+  metricsApp.get("/metrics", async (_req, res) => {
+    res.set("Content-Type", metrics.registry.contentType);
+    res.end(await metrics.registry.metrics());
+  });
+  metricsApp.get("/health", (_req, res) => res.json({ status: "ok" }));
+  metricsApp.listen(metricsPort, () => logger.info("worker_metrics_server_started", { port: metricsPort }));
+
   runLoop().catch((err) => {
     logger.error("outbox_worker_fatal", { error: (err as Error).message });
     process.exit(1);
